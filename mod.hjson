@@ -1,7 +1,7 @@
 name: undo
 displayName: Undo
 author: m3rcur1e
-version: "1.0.0"
+version: "1.1.0"
 minGameVersion: "160"
 hidden: true
 description: "Ctrl+Z undoes your last build actions, Ctrl+Shift+Z redoes them: placed blocks are removed, deconstructed ones come back with their rotation and settings, cancelled plans return. Keys in Controls, history depth in Settings."

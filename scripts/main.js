@@ -193,6 +193,11 @@ function captureBreakArea(inp){
     }
 }
 
+function begunFor(key, block){
+    const b = begun[key];
+    return b != null && b.block == block ? b.replaced : null;
+}
+
 function resetPending(){
     originals = {};
     begun = {};
@@ -203,6 +208,16 @@ function push(act){
     actions.push(act);
     const max = depth();
     while(actions.length > max) actions.shift();
+}
+
+function prime(){
+    const u = unit();
+    if(u == null || desktop() == null || (known != null && knownUnit == u.id)) return;
+    known = snapshot(u);
+    knownUnit = u.id;
+    completed = [];
+    rotations = [];
+    resetPending();
 }
 
 function check(){
@@ -226,8 +241,11 @@ function check(){
     }
 
     const added = now.filter(n => !known.ids.containsKey(n.plan));
+    const done = {};
+    completed.forEach(c => done[key3(c.x, c.y, c.breaking)] = true);
     const removed = known.filter(k => !now.ids.containsKey(k.plan)).filter(k =>
-        k.breaking ? (blockAt(k.x, k.y) != null && blockAt(k.x, k.y) != Blocks.air) : blockAt(k.x, k.y) != k.block
+        done[key3(k.x, k.y, k.breaking)] !== true &&
+        (k.breaking ? (blockAt(k.x, k.y) != null && blockAt(k.x, k.y) != Blocks.air) : blockAt(k.x, k.y) != k.block && placeable(k))
     );
 
     if(completed.length > 0){
@@ -240,7 +258,7 @@ function check(){
             if(c.breaking){
                 added.push({plan: null, x: c.x, y: c.y, breaking: true, original: originals[key] || begunBreak[key] || null});
             }else{
-                added.push({plan: null, x: c.x, y: c.y, rotation: c.rotation, block: c.block, config: c.config, breaking: false, replaced: begun[key] || []});
+                added.push({plan: null, x: c.x, y: c.y, rotation: c.rotation, block: c.block, config: c.config, breaking: false, replaced: begunFor(key, c.block) || []});
             }
         });
         completed = [];
@@ -253,7 +271,7 @@ function check(){
                 a.rot = true;
                 a.replaced = [];
             }else if(a.replaced == null){
-                a.replaced = begun[key] || replacedBy(a.x, a.y, a.block);
+                a.replaced = begunFor(key, a.block) || replacedBy(a.x, a.y, a.block);
             }
             return;
         }
@@ -291,11 +309,17 @@ function check(){
     redos.length = 0;
 }
 
+function placeable(k){
+    const t = Vars.world.tile(k.x, k.y);
+    if(t != null && t.build instanceof CONSTRUCT && t.build.current == k.block && t.build.tileX() == k.x && t.build.tileY() == k.y) return true;
+    return Build.validPlaceIgnoreUnits(k.block, Vars.player.team(), k.x, k.y, k.rotation, true, true);
+}
+
 function isRotatePlan(a){
     const t = Vars.world.tile(a.x, a.y);
     const b = t == null ? null : t.build;
     return b != null && b.team == Vars.player.team() && !(b instanceof CONSTRUCT) && b.block == a.block &&
-        b.tileX() == a.x && b.tileY() == a.y;
+        b.tileX() == a.x && b.tileY() == a.y && a.block.rotate && blockRotation(b) != a.rotation;
 }
 
 function mergeLateRotations(rotated){
@@ -322,6 +346,62 @@ function mergeLateRotations(rotated){
         delete act.lateRot;
         act.rotated = freeze(list);
     });
+}
+
+function obstacles(x, y, block){
+    const out = [];
+    const team = Vars.player.team();
+    const off = -((block.size - 1) >> 1);
+    for(let dx = 0; dx < block.size; dx++){
+        for(let dy = 0; dy < block.size; dy++){
+            let t = Vars.world.tile(x + off + dx, y + off + dy);
+            if(t == null || t.build == null || t.build.team != team) continue;
+            let b = t.build, center = b.tileX() == x && b.tileY() == y;
+            if(out.indexOf(b) >= 0) continue;
+            if(b instanceof CONSTRUCT){
+                if(b.current == block && center) continue;
+            }else if((b.block == block && center) || block.canReplace(b.block)){
+                continue;
+            }
+            out.push(b);
+        }
+    }
+    return out;
+}
+
+function hasPlan(u, x, y, breaking){
+    const q = u.plans;
+    for(let i = 0; i < q.size; i++){
+        let p = q.get(i);
+        if(p.x == x && p.y == y && p.breaking == breaking) return true;
+    }
+    return false;
+}
+
+function placeBack(u, x, y, rotation, block, config){
+    const obs = obstacles(x, y, block);
+    if(obs.length == 0){
+        u.addBuild(new BuildPlan(x, y, rotation, block, config));
+        return;
+    }
+    const q = u.plans;
+    let samePos = false;
+    obs.forEach(b => {
+        const bx = b.tileX(), by = b.tileY();
+        if(bx == x && by == y) samePos = true;
+        if(hasPlan(u, bx, by, true)) return;
+        if(bx == x && by == y) q.addLast(new BuildPlan(bx, by));
+        else u.addBuild(new BuildPlan(bx, by));
+    });
+    if(!samePos){
+        u.addBuild(new BuildPlan(x, y, rotation, block, config));
+        return;
+    }
+    for(let i = q.size - 1; i >= 0; i--){
+        let p = q.get(i);
+        if(p.x == x && p.y == y && !p.breaking) q.removeIndex(i);
+    }
+    q.addLast(new BuildPlan(x, y, rotation, block, config));
 }
 
 function dropAll(u, keys){
@@ -359,20 +439,20 @@ function undo(){
             const t = Vars.world.tile(a.x, a.y);
             const now = t != null && t.build != null && t.build.team == team ? t.build : null;
             if(same != null){
-                if(blockAt(a.x, a.y) != same.block) u.addBuild(new BuildPlan(same.x, same.y, same.rotation, same.block, same.config));
+                if(blockAt(a.x, a.y) != same.block) placeBack(u, same.x, same.y, same.rotation, same.block, same.config);
             }else if(now != null){
                 u.addBuild(new BuildPlan(now.tileX(), now.tileY()));
             }
-            repl.forEach(o => { if(o !== same) u.addBuild(new BuildPlan(o.x, o.y, o.rotation, o.block, o.config)); });
+            repl.forEach(o => { if(o !== same) placeBack(u, o.x, o.y, o.rotation, o.block, o.config); });
         }else if(a.original != null && blockAt(a.x, a.y) != a.original.block){
-            u.addBuild(new BuildPlan(a.x, a.y, a.original.rotation, a.original.block, a.original.config));
+            placeBack(u, a.x, a.y, a.original.rotation, a.original.block, a.original.config);
         }
     });
     removed.forEach(r => {
         if(r.breaking){
-            u.addBuild(new BuildPlan(r.x, r.y));
+            if(!hasPlan(u, r.x, r.y, true)) u.addBuild(new BuildPlan(r.x, r.y));
         }else if(blockAt(r.x, r.y) != r.block){
-            u.addBuild(new BuildPlan(r.x, r.y, r.rotation, r.block, r.config));
+            placeBack(u, r.x, r.y, r.rotation, r.block, r.config);
         }
     });
     rotated.forEach(r => {
@@ -416,7 +496,7 @@ function redo(){
                 pendingRot[key2(a.x, a.y)] = act;
             }
         }else if(!a.breaking){
-            if(blockAt(a.x, a.y) != a.block) u.addBuild(new BuildPlan(a.x, a.y, a.rotation, a.block, a.config));
+            if(blockAt(a.x, a.y) != a.block) placeBack(u, a.x, a.y, a.rotation, a.block, a.config);
         }else{
             const b = blockAt(a.x, a.y);
             if(b != null && b != Blocks.air) u.addBuild(new BuildPlan(a.x, a.y));
@@ -479,7 +559,7 @@ Events.on(BlockBuildBeginEvent, e => guarded(() => {
     if(e.breaking){
         if(c.prevBuild != null && c.prevBuild.size > 0) begunBreak[key] = infoOf(c.prevBuild.first());
     }else{
-        begun[key] = replacedBy(c.tileX(), c.tileY(), c.current);
+        begun[key] = {block: c.current, replaced: replacedBy(c.tileX(), c.tileY(), c.current)};
     }
 }));
 
@@ -496,6 +576,7 @@ function onKey(key){
 
 Core.input.addProcessor(extend(InputProcessor, {
     keyDown(key){
+        guarded(prime);
         guarded(() => onKey(key));
         return false;
     },
@@ -504,6 +585,7 @@ Core.input.addProcessor(extend(InputProcessor, {
         return false;
     },
     touchDown(x, y, pointer, button){
+        guarded(prime);
         guarded(() => onKey(button));
         return false;
     },
@@ -515,6 +597,29 @@ Core.input.addProcessor(extend(InputProcessor, {
         afterUpdate(() => guarded(check));
         return false;
     }
+}));
+
+function keyName(k){
+    return k == KeyCode.unset ? "?" : String(k.value);
+}
+
+function fromButton(fn){
+    if(desktop() == null || blocked()) return;
+    fn();
+}
+
+Events.on(Packages.mindustry.ui.fragments.HudFragment, req => guarded(() => {
+    if(req == null || req.buttons == null) return;
+    const b = Core.bundle;
+    const redoKey = REDO.value.key != UNDO.value.key ? "Ctrl+" + keyName(REDO.value.key) : "Ctrl+Shift+" + keyName(REDO.value.key);
+    req.buttons.push(
+        {name: "undo-undo", icon: Icon.undo, order: "b[blueprints]-a[undo]",
+            tooltip: b.get("undo.button.undo", "Undo") + " (Ctrl+" + keyName(UNDO.value.key) + ")",
+            enabled: () => actions.length > 0, clicked: () => fromButton(undo)},
+        {name: "undo-redo", icon: Icon.redo, order: "b[blueprints]-b[redo]",
+            tooltip: b.get("undo.button.redo", "Redo") + " (" + redoKey + ")",
+            enabled: () => redos.length > 0, clicked: () => fromButton(redo)}
+    );
 }));
 
 cur1e.settings({mod: "undo", title: "undo.settings", icon: "undo", build: t => {
